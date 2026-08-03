@@ -216,3 +216,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project data files
+*.db
+*.db-shm
+*.db-wal
+*.csv
+tmp/
+labelled_data_cache/
+*.parquet
+*.json
+*.png
+*.jpeg
+*.jpg
+*.safetensors
