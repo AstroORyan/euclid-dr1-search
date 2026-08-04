@@ -92,6 +92,12 @@ SCORE_INDEX_NAME = "idx_score_covering"
 # iterations, in seconds.
 TRAIN_LOG_INTERVAL = 30.0
 
+# Minimum seconds between tqdm refreshes in the subprocesses. AnomalyMatch relays
+# subprocess output through loguru line by line, so every refresh of the scoring
+# bar costs a line of terminal - once per second over a multi-hour run buries
+# everything else.
+DEFAULT_TQDM_INTERVAL = 30.0
+
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
@@ -178,6 +184,16 @@ def parse_args(argv=None):
         "--skip-training",
         action="store_true",
         help="Score only, reusing the model already in <run-dir>/iteration_0/model.safetensors.",
+    )
+    parser.add_argument(
+        "--tqdm-interval",
+        type=float,
+        default=DEFAULT_TQDM_INTERVAL,
+        help=(
+            "Minimum seconds between progress-bar refreshes in the subprocesses "
+            "(default: %(default)s). Each refresh costs a line in the terminal, so "
+            "raising this thins the scoring bar out. 0 leaves tqdm's own default."
+        ),
     )
     parser.add_argument(
         "--scratch-db",
@@ -764,6 +780,14 @@ def main(argv=None):
         seeds = seeds[: args.runs]
     if not seeds:
         raise SystemExit("No seeds given.")
+
+    # Inherited by every subprocess AnomalyMatch spawns. tqdm reads TQDM_* from
+    # the environment for any meter that does not set the value itself, which
+    # covers the long-running "Processing batches" bar in the scoring subprocess.
+    # It cannot redraw in place - the parent relays its output through loguru a
+    # line at a time - so throttling refreshes is what keeps the terminal usable.
+    if args.tqdm_interval > 0:
+        os.environ["TQDM_MININTERVAL"] = str(args.tqdm_interval)
 
     args.results_root.mkdir(parents=True, exist_ok=True)
     work_dir = (args.work_dir or args.results_root).expanduser().resolve()

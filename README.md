@@ -78,6 +78,11 @@ Notes:
   directory, no log file and no session folder behind.
 - `--build-score-index` builds the `idx_score_covering` index at the end of each
   run, which the analysis then does not have to build itself.
+- Progress bars in the subprocesses cannot redraw in place: AnomalyMatch relays
+  subprocess output through the logger one line at a time, so every refresh
+  costs a terminal line. `--tqdm-interval` (default 30 s) throttles them via
+  `TQDM_MININTERVAL` so the scoring bar does not bury everything else; the
+  per-chunk `Run status:` lines carry the useful progress anyway.
 
 #### Disk hygiene
 
