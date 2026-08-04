@@ -1,0 +1,32 @@
+# Tooling configuration for euclid-dr1-search.
+#
+# This repository is a collection of scripts and notebooks rather than an
+# installable package, so there is no [build-system] or [project] table here -
+# only the lint, format and dead-code tools read this file.
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+# Notebooks are exploratory working documents; holding them to the script
+# standard would mean reformatting cells on every commit for no benefit.
+extend-exclude = ["*.ipynb", ".ipynb_checkpoints"]
+
+[tool.ruff.lint]
+select = [
+    "E", # pycodestyle errors
+    "F", # pyflakes - unused imports and variables, undefined names
+    "W", # pycodestyle warnings
+    "I", # import sorting
+]
+ignore = [
+    "E402", # module-level import after code: benchmark_analysis.py must set the
+    # matplotlib backend before importing pyplot
+    "E501", # line length is the formatter's business, not the linter's
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["anomaly_match", "anomaly_match_ui"]
+
+[tool.vulture]
+min_confidence = 60
+paths = ["scripts"]

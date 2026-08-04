@@ -137,3 +137,36 @@ python scripts/benchmark_analysis.py --known-csv data/known_lenses/known_lenses_
     present in the sample.
   - `identifying-missing-labels.ipynb` — tracks down labelled sources that do
     not appear in the Cutana catalogues.
+
+## Development checks
+
+Two GitHub Actions workflows run on every push and pull request, mirroring the
+equivalents in the AnomalyMatch repository:
+
+| Workflow | Checks |
+|---|---|
+| `.github/workflows/formatting.yml` | `ruff check` (pycodestyle, pyflakes, import sorting) and `ruff format --check` |
+| `.github/workflows/dead_code.yml` | `vulture` at 100% confidence (blocking) and at 60% (required) |
+
+Both are configured in `pyproject.toml`: line length 110, Python 3.11, notebooks
+excluded — they are exploratory working documents, and holding them to the
+script standard would mean reformatting cells on every commit. Licence-header
+checks and pytest runs are deliberately *not* included.
+
+To run them locally (`pip install ruff "vulture>=2.10"` if needed):
+
+```bash
+ruff check .                 # add --fix to apply the safe fixes
+ruff format .                # --check to report without rewriting
+python -m vulture scripts/ .vulture_whitelist.py --min-confidence 60
+```
+
+Ruff is pinned to the same version in CI as the one used locally, so a new ruff
+release cannot fail a repository that was clean when it was pushed; bump both
+together.
+
+Vulture reports anything it cannot see being used. Most false positives here are
+AnomalyMatch config attributes: the scripts only ever *write* them onto the
+config, and they are read inside AnomalyMatch or its subprocesses. Add those to
+`.vulture_whitelist.py` with a comment saying who consumes them — a genuinely
+unused attribute is worth deleting instead.

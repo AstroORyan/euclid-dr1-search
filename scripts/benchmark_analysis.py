@@ -32,7 +32,9 @@ DEFAULT_TOP_N = 5_000
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
         "--known-csv",
         required=True,
@@ -146,7 +148,9 @@ def load_top_sources(db_path, top_n):
             raise SystemExit(f"No rows in {db_path}.")
 
         if top_n > total_rows:
-            print(f"Requested top {top_n:_} but the database only holds {total_rows:_} rows - using all of them.")
+            print(
+                f"Requested top {top_n:_} but the database only holds {total_rows:_} rows - using all of them."
+            )
             top_n = total_rows
 
         plan = con.execute(
@@ -230,8 +234,10 @@ def main(argv=None):
 
     ensure_score_index(db_path)
     df_scored, total_rows = load_top_sources(db_path, args.top_n)
-    print(f"Extracted {len(df_scored):_} of {total_rows:_} sources "
-          f"(score range {df_scored['score'].min():.4f} - {df_scored['score'].max():.4f})\n")
+    print(
+        f"Extracted {len(df_scored):_} of {total_rows:_} sources "
+        f"(score range {df_scored['score'].min():.4f} - {df_scored['score'].max():.4f})\n"
+    )
 
     # Cumulative matches walking down the ranked list.
     is_match = to_source_ids(df_scored["filename"]).isin(known_ids).to_numpy()
@@ -256,8 +262,10 @@ def main(argv=None):
         }
     ).to_csv(out_dir / "recovery_curve.csv", index=False)
 
-    print(f"Recovered {cumul_found[-1]:_} / {len(known_ids):_} known anomalies "
-          f"({frac_found[-1]:.2%}) after searching {frac_searched[-1]:.4%} of the database.")
+    print(
+        f"Recovered {cumul_found[-1]:_} / {len(known_ids):_} known anomalies "
+        f"({frac_found[-1]:.2%}) after searching {frac_searched[-1]:.4%} of the database."
+    )
     print(f"Wrote 2 plots and recovery_curve.csv to {out_dir}")
 
 

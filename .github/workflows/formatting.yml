@@ -1,0 +1,21 @@
+name: Ruff Lint and Format Check
+
+on: [push, pull_request]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned so CI and local runs agree: an unpinned ruff can start failing a
+      # previously clean repository the day it changes a formatting rule.
+      - uses: astral-sh/ruff-action@v3
+        with:
+          version: "0.15.12"
+          args: "check"
+          src: "."
+      - uses: astral-sh/ruff-action@v3
+        with:
+          version: "0.15.12"
+          args: "format --check"
+          src: "."

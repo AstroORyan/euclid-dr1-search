@@ -1,0 +1,36 @@
+name: Dead Code Detection
+
+on: [push, pull_request]
+
+jobs:
+  vulture-strict:
+    name: Vulture (100% confidence - blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install vulture
+        run: pip install "vulture>=2.10"
+      - name: Run vulture (100% confidence)
+        run: |
+          echo "Running vulture dead code detection (100% confidence - blocking)..."
+          vulture scripts/ .vulture_whitelist.py --min-confidence 100
+
+  vulture-warnings:
+    name: Vulture (60% confidence - required)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install vulture
+        run: pip install "vulture>=2.10"
+      - name: Run vulture (60% confidence)
+        run: |
+          echo "Running vulture dead code detection (60% confidence - required)..."
+          vulture scripts/ .vulture_whitelist.py --min-confidence 60
