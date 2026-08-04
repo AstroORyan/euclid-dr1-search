@@ -230,3 +230,4 @@ labelled_data_cache/
 *.jpeg
 *.jpg
 *.safetensors
+.claude.md
