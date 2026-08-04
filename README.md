@@ -72,8 +72,18 @@ conda run -n am python scripts/run_benchmark.py --seeds 42 --runs 1 --num-train-
 
 Notes:
 
-- The script refuses to start if a run directory already holds a
-  `predictions.db`; pass `--resume` to continue an interrupted run.
+- The script refuses to start if the *run directory* already holds a
+  `predictions.db`; pass `--resume` to continue an interrupted run. A stale
+  scratch copy under `<tmpdir>/anomaly_match_db/runN/` never blocks a run — it is
+  deleted at the start of a fresh one, since a relocated run would otherwise
+  seed itself from it and mix another seed's scores into the results.
+- `predictions.db` is pinned to the run directory. Left to itself, AnomalyMatch
+  relocates the *live* database to `<tmpdir>/anomaly_match_db/runN/` whenever the
+  session directory is on NFS and snapshots it back after every chunk, keeping
+  two full copies of a 50M-row database — awkward on Datalabs. The relocation
+  guards against write-ahead-log bloat under a slow reader (the UI polling over
+  NFS), which does not apply headless; `--scratch-db` restores it if a run ever
+  does show WAL growth.
 - AnomalyMatch writes scratch files (`tmp/`, `anomaly_match_results/`) relative
   to the working directory, so the script `chdir`s into `--work-dir` (the
   results root by default) to keep them out of the repo.

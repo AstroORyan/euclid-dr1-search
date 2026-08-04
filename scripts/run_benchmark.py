@@ -29,10 +29,12 @@ Example
 """
 
 import argparse
+import contextlib
 import json
 import os
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timedelta
@@ -176,6 +178,15 @@ def parse_args(argv=None):
         action="store_true",
         help="Score only, reusing the model already in <run-dir>/iteration_0/model.safetensors.",
     )
+    parser.add_argument(
+        "--scratch-db",
+        action="store_true",
+        help=(
+            "Let AnomalyMatch keep the live predictions.db on local scratch "
+            "(<tmpdir>/anomaly_match_db/runN) and snapshot it back after every chunk. "
+            "Off by default: it doubles the disk footprint of a 50M-source run."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -223,10 +234,30 @@ def build_config(args, seed, run_dir):
     cfg.model_path = None
     cfg.output_dir = str(run_dir)
     cfg.save_dir = str(run_dir)
+    set_db_dir(cfg, run_dir, args.scratch_db)
     return cfg
 
 
-def pin_output_dir(cfg, run_dir):
+def set_db_dir(cfg, run_dir, use_scratch):
+    """Choose where the live predictions database lives.
+
+    Left unset, AnomalyMatch relocates the live database to
+    `<tmpdir>/anomaly_match_db/<run name>/` whenever the session directory is on
+    a network filesystem, and snapshots it back to the session after every
+    chunk - so a 50M-source run keeps two full copies, one of them on the pod's
+    local disk. Pinning `prediction_db_dir` to the run directory disables that:
+    an explicit path always wins over the auto-relocation.
+
+    The relocation exists to stop the write-ahead log growing without bound when
+    a slow reader (the UI, polling over NFS) pins a WAL snapshot. Headless there
+    is no such reader, and the writer checkpoints its own WAL, so pinning is
+    safe here - `--scratch-db` restores the default behaviour if a run does show
+    WAL bloat.
+    """
+    cfg.prediction_db_dir = None if use_scratch else str(run_dir)
+
+
+def pin_output_dir(cfg, run_dir, use_scratch):
     """Point the session's outputs back at `run_dir`.
 
     `Session.__init__` redirects `output_dir`/`save_dir` to
@@ -238,27 +269,61 @@ def pin_output_dir(cfg, run_dir):
     cfg.output_dir = str(run_dir)
     cfg.save_dir = str(run_dir)
     cfg.model_path = None
+    set_db_dir(cfg, run_dir, use_scratch)
 
 
 def check_run_dir(cfg, run_dir, resume):
     """Refuse to overwrite an existing run unless `--resume` was passed.
 
-    Checks both the run directory and, on a networked session dir, the local
-    scratch copy the live database is relocated to - a leftover scratch DB from
-    an earlier invocation would silently be resumed (and mixed with a different
-    seed's scores).
+    Only the run directory's own database counts here: it is the durable copy
+    and the one `benchmark_analysis.py` reads. A scratch copy under the temp
+    directory is a leftover rather than a result, so `clear_scratch_db` deletes
+    it instead of blocking the run.
     """
-    for label, path in (
-        ("session", Path(session_db_path(cfg))),
-        ("live", Path(prediction_db_path(cfg))),
-    ):
-        if path.is_file() and not resume:
-            raise SystemExit(
-                f"A {label} predictions.db already exists at {path}.\n"
-                f"Delete it, choose another run index, or pass --resume to continue it."
-            )
+    db_path = Path(session_db_path(cfg))
+    if db_path.is_file() and not resume:
+        raise SystemExit(
+            f"A predictions.db already exists at {db_path}.\n"
+            f"Delete it, choose another run index, or pass --resume to continue it."
+        )
     if resume:
         logger.warning("Resume enabled - existing scores in {} will be kept", run_dir)
+
+
+def scratch_db_dir(run_dir):
+    """Where AnomalyMatch would relocate the live database for this run.
+
+    Mirrors `db_location._local_scratch_dir`: `<tmpdir>/anomaly_match_db/<run
+    name>`. Recomputed here rather than imported because that helper returns
+    None unless the session directory is on a network filesystem, and we want to
+    find the leftovers either way.
+    """
+    return Path(tempfile.gettempdir()) / "anomaly_match_db" / run_dir.name
+
+
+def clear_scratch_db(run_dir):
+    """Delete any scratch copy of predictions.db left behind by an earlier run.
+
+    A relocated run seeds itself from whatever is already on scratch, so a
+    leftover database would be silently resumed - and, with a different seed,
+    mixed into this run's scores. These files are also large enough to matter on
+    a Datalabs pod. Only called for a fresh (non-resumed) run, where the run
+    directory has already been cleared and the scratch copy is therefore stale
+    by definition.
+    """
+    scratch = scratch_db_dir(run_dir)
+    removed = []
+    for suffix in ("", "-wal", "-shm"):
+        path = scratch / f"predictions.db{suffix}"
+        if path.is_file():
+            size_gb = path.stat().st_size / 1e9
+            path.unlink()
+            removed.append(f"{path.name} ({size_gb:.2f} GB)")
+    if removed:
+        logger.info("Cleared stale scratch database in {}: {}", scratch, ", ".join(removed))
+    # Succeeds only if we emptied it; anything else there is not ours to remove.
+    with contextlib.suppress(OSError):
+        scratch.rmdir()
 
 
 def validate_labels(args):
@@ -533,10 +598,13 @@ def run_once(args, run_index, seed, found_locations):
         cfg = build_config(args, seed, run_dir)
         session = am.Session(cfg)
         # Session.__init__ hijacks the output paths; put them back on run_dir.
-        pin_output_dir(cfg, run_dir)
+        pin_output_dir(cfg, run_dir, args.scratch_db)
         BackendInterface.set_session(session)
+        logger.info("Live predictions.db: {}", prediction_db_path(cfg))
 
         check_run_dir(cfg, run_dir, args.resume)
+        if not args.resume:
+            clear_scratch_db(run_dir)
         prepare_labeled_cache(args, found_locations)
 
         # Record exactly what this run was configured with, next to its results.
@@ -594,6 +662,7 @@ def write_run_config(cfg, run_dir, args, seed):
         "label_file": cfg.label_file,
         "labeled_cache_path": cfg.labeled_cache_path,
         "output_dir": cfg.output_dir,
+        "prediction_db_dir": cfg.prediction_db_dir,
         "num_train_iter": cfg.num_train_iter,
         "image_size": list(cfg.normalisation.image_size),
         "normalisation_method": str(cfg.normalisation.normalisation_method),
