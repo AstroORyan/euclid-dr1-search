@@ -73,22 +73,44 @@ conda run -n am python scripts/run_benchmark.py --seeds 42 --runs 1 --num-train-
 Notes:
 
 - The script refuses to start if the *run directory* already holds a
-  `predictions.db`; pass `--resume` to continue an interrupted run. A stale
-  scratch copy under `<tmpdir>/anomaly_match_db/runN/` never blocks a run — it is
-  deleted at the start of a fresh one, since a relocated run would otherwise
-  seed itself from it and mix another seed's scores into the results.
-- `predictions.db` is pinned to the run directory. Left to itself, AnomalyMatch
-  relocates the *live* database to `<tmpdir>/anomaly_match_db/runN/` whenever the
-  session directory is on NFS and snapshots it back after every chunk, keeping
-  two full copies of a 50M-row database — awkward on Datalabs. The relocation
-  guards against write-ahead-log bloat under a slow reader (the UI polling over
-  NFS), which does not apply headless; `--scratch-db` restores it if a run ever
-  does show WAL growth.
-- AnomalyMatch writes scratch files (`tmp/`, `anomaly_match_results/`) relative
-  to the working directory, so the script `chdir`s into `--work-dir` (the
-  results root by default) to keep them out of the repo.
+  `predictions.db`; pass `--resume` to continue an interrupted run. All
+  validation runs before anything is written, so a rejected run leaves no run
+  directory, no log file and no session folder behind.
 - `--build-score-index` builds the `idx_score_covering` index at the end of each
   run, which the analysis then does not have to build itself.
+
+#### Disk hygiene
+
+Left to its own devices, AnomalyMatch spreads a run across several places and
+cleans up none of them, which adds up quickly at 50M sources on a Datalabs pod.
+The script is deliberately aggressive about pulling everything back into
+`<results-root>/runN/`:
+
+- **No second copy of the database.** `prediction_db_dir` is pinned to the run
+  directory. Otherwise AnomalyMatch relocates the *live* database to
+  `<tmpdir>/anomaly_match_db/runN/` whenever the session directory is on NFS and
+  snapshots it back after every chunk, leaving two full copies of a 50M-row
+  database. That relocation guards against write-ahead-log bloat under a slow
+  reader (the UI polling over NFS), which does not apply headless — `--scratch-db`
+  restores it if a run ever does show WAL growth.
+- **Stale scratch databases are deleted, not obeyed.** A leftover
+  `<tmpdir>/anomaly_match_db/runN/` never blocks a run; it is removed (with its
+  size logged) at the start of a fresh one, since a relocated run would otherwise
+  seed itself from it and mix another seed's scores into the results.
+- **No timestamped session folders.** Every `Session` creates
+  `anomaly_match_results/sessions/<name>_<timestamp>/` and logs into it, even
+  though the run's outputs are re-pointed at the run directory. The script
+  removes that folder — and, importantly, its log sinks — once the run finishes.
+  Without that, the sinks would stay registered for the life of the process and
+  every later run would keep writing into every earlier run's folder.
+- **Scratch files stay out of the repo.** AnomalyMatch writes `tmp/` and
+  `anomaly_match_results/` relative to the working directory, so the script
+  `chdir`s into `--work-dir` (the results root by default).
+
+Clearing out session folders left by *earlier* work is a manual job, and worth a
+look before deleting: the ones this script creates only ever contain
+`session.log`, but a session folder from a UI run is the real output directory
+and holds its model, labels and predictions.
 
 ### `scripts/benchmark_analysis.py`
 

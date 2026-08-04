@@ -32,6 +32,7 @@ import argparse
 import contextlib
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -272,22 +273,31 @@ def pin_output_dir(cfg, run_dir, use_scratch):
     set_db_dir(cfg, run_dir, use_scratch)
 
 
-def check_run_dir(cfg, run_dir, resume):
-    """Refuse to overwrite an existing run unless `--resume` was passed.
+def preflight(args, run_dir):
+    """Validate a run before anything is created on disk.
 
-    Only the run directory's own database counts here: it is the durable copy
-    and the one `benchmark_analysis.py` reads. A scratch copy under the temp
-    directory is a leftover rather than a result, so `clear_scratch_db` deletes
-    it instead of blocking the run.
+    Runs ahead of the run directory, the log file and the `Session`, so a
+    rejected run leaves nothing behind to tidy up.
+
+    Only the run directory's own database counts as a result: it is the durable
+    copy and the one `benchmark_analysis.py` reads. A scratch copy under the
+    temp directory is a leftover, so it is deleted rather than treated as a
+    reason to stop.
     """
-    db_path = Path(session_db_path(cfg))
-    if db_path.is_file() and not resume:
+    db_path = run_dir / "predictions.db"
+    if db_path.is_file() and not args.resume:
         raise SystemExit(
             f"A predictions.db already exists at {db_path}.\n"
             f"Delete it, choose another run index, or pass --resume to continue it."
         )
-    if resume:
+    if args.skip_training and not (run_dir / "iteration_0" / "model.safetensors").is_file():
+        raise SystemExit(
+            f"--skip-training was passed but {run_dir / 'iteration_0' / 'model.safetensors'} does not exist."
+        )
+    if args.resume:
         logger.warning("Resume enabled - existing scores in {} will be kept", run_dir)
+    else:
+        clear_scratch_db(run_dir)
 
 
 def scratch_db_dir(run_dir):
@@ -359,6 +369,53 @@ def prepare_labeled_cache(args, found_locations):
         raise SystemExit("Failed to build the labelled data cache.")
     logger.info("Labelled cutout cache: {}", cache_dir)
     return cache_dir
+
+
+def log_handler_ids():
+    """Snapshot of loguru's currently registered sink ids.
+
+    loguru exposes no public accessor, but `Session.__init__` adds sinks
+    (a `session.log` inside its own timestamped folder, plus the pair
+    `set_log_level` manages) without returning their ids. Diffing this around
+    the constructor is the only way to get them back so they can be removed.
+    """
+    core = getattr(logger, "_core", None)
+    return set(getattr(core, "handlers", {}))
+
+
+def discard_session_dir(session_dir, handler_ids):
+    """Remove the timestamped session folder AnomalyMatch creates per run.
+
+    `Session.__init__` always creates
+    `anomaly_match_results/sessions/<name>_<timestamp>/` and logs into it, even
+    though we immediately re-point the run's outputs at `run_dir`. Nothing ever
+    removes those sinks, so without this every later run would keep writing into
+    every earlier run's folder, and the folders would pile up one per run.
+
+    The sinks go first (so the files are closed and nothing writes there again),
+    then the folder - but only if it holds nothing besides its own log.
+    """
+    for handler_id in handler_ids:
+        # Already gone if set_log_level recycled its own sinks mid-run.
+        with contextlib.suppress(ValueError):
+            logger.remove(handler_id)
+
+    if session_dir is None or not session_dir.is_dir():
+        return
+    keep = [
+        entry.name
+        for entry in session_dir.iterdir()
+        if not (entry.is_file() and entry.name.startswith("session") and entry.suffix == ".log")
+    ]
+    if keep:
+        logger.warning("Keeping AnomalyMatch session folder {} - it holds {}", session_dir, sorted(keep))
+        return
+    shutil.rmtree(session_dir, ignore_errors=True)
+    logger.debug("Removed empty AnomalyMatch session folder {}", session_dir)
+    # Tidy the now-empty parents too; rmdir refuses when anything remains.
+    with contextlib.suppress(OSError):
+        session_dir.parent.rmdir()
+        session_dir.parent.parent.rmdir()
 
 
 def drain_stderr(stream, prefix):
@@ -572,8 +629,11 @@ def elapsed(start):
 def run_once(args, run_index, seed, found_locations):
     """Set up, train, score and tear down a single seeded run."""
     run_dir = args.results_root / f"run{run_index}"
-    run_dir.mkdir(parents=True, exist_ok=True)
 
+    # Validate first: nothing below this line is created if the run is rejected.
+    preflight(args, run_dir)
+
+    run_dir.mkdir(parents=True, exist_ok=True)
     log_id = logger.add(
         run_dir / "benchmark_run.log",
         rotation="50 MB",
@@ -586,6 +646,8 @@ def run_once(args, run_index, seed, found_locations):
     logger.info("=" * 70)
 
     session = None
+    session_dir = None
+    session_handlers = set()
     summary = {
         "run": f"run{run_index}",
         "seed": seed,
@@ -596,15 +658,18 @@ def run_once(args, run_index, seed, found_locations):
 
     try:
         cfg = build_config(args, seed, run_dir)
+
+        handlers_before = log_handler_ids()
         session = am.Session(cfg)
+        # Sinks and the folder the session made for itself, so both can go again.
+        session_handlers = log_handler_ids() - handlers_before
+        session_dir = Path(session.session_io.get_session_save_path(session.session_tracker))
+
         # Session.__init__ hijacks the output paths; put them back on run_dir.
         pin_output_dir(cfg, run_dir, args.scratch_db)
         BackendInterface.set_session(session)
         logger.info("Live predictions.db: {}", prediction_db_path(cfg))
 
-        check_run_dir(cfg, run_dir, args.resume)
-        if not args.resume:
-            clear_scratch_db(run_dir)
         prepare_labeled_cache(args, found_locations)
 
         # Record exactly what this run was configured with, next to its results.
@@ -612,8 +677,6 @@ def run_once(args, run_index, seed, found_locations):
 
         if args.skip_training:
             model_path = run_dir / "iteration_0" / "model.safetensors"
-            if not model_path.is_file():
-                raise SystemExit(f"--skip-training was passed but {model_path} does not exist.")
             cfg.model_path = str(model_path)
             logger.info("Skipping training, scoring with {}", model_path)
         else:
@@ -649,6 +712,8 @@ def run_once(args, run_index, seed, found_locations):
         summary["finished"] = datetime.now().isoformat(timespec="seconds")
         (run_dir / "run_summary.json").write_text(json.dumps(summary, indent=2))
         logger.info("Run {} {} in {}", run_index, summary["status"], summary["duration"])
+        # Last, so anything logged above still reaches the session log first.
+        discard_session_dir(session_dir, session_handlers)
         logger.remove(log_id)
 
     return summary
